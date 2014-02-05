@@ -13,7 +13,6 @@
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 
-#define MODEM			"/dev/ttyUSB1"
 #define SETF			"SNDF\r"
 #define BUFFER			2048
 #define SMALL			32
@@ -191,9 +190,10 @@ int open_socket(int port) {
     return sock_fd;
 }
 
-int main(void) {
+
+int event_loop(char * device_file, char * port, int log_fd) {
     int tty_fd, is_dev_opened;
-    char data[BUFFER], temp[BUFFER], device_data[BUFFER], logtmp[BUFFER];
+    char data[BUFFER], device_data[BUFFER], logtmp[BUFFER];
     int count, data_count;
     int i, j, idx;
 
@@ -207,7 +207,7 @@ int main(void) {
 
     time_t open_time;
 
-    char * reqs;
+    char * reqs, * temp;
 
     fd_set rfds;
     struct timeval tv;
@@ -228,25 +228,25 @@ int main(void) {
     while (1) {
 
     	if (!is_dev_opened) {
-    		tty_fd = open_device(MODEM);
+    		tty_fd = open_device(device_file);
     		++is_dev_opened;
     		open_time = time(NULL);
 
     		if (tty_fd > 0) {
-    			snprintf(logtmp, BUFFER, "Device %s opened correctly\n", MODEM);
+    			snprintf(logtmp, BUFFER, "Device %s opened correctly\n", device_file);
     			send_log(log_sock_fd, logtmp);
     			write(tty_fd, SETF, strlen(SETF));
     			usleep(MICROSLEEP);
     		}
 
     		if (-ENXIO == tty_fd) {
-    			snprintf(logtmp, BUFFER, "Device file %s doesn't exist\n", MODEM);
+    			snprintf(logtmp, BUFFER, "Device file %s doesn't exist\n", device_file);
     			send_log(log_sock_fd, logtmp);
     			is_dev_opened = 0;
     			usleep(MICROSLEEP);
     		}
     		if (!tty_fd) {
-    			snprintf(logtmp, BUFFER, "Device file %s can't be opened\n", MODEM);
+    			snprintf(logtmp, BUFFER, "Device file %s can't be opened\n", device_file);
     			send_log(log_sock_fd, logtmp);
     			is_dev_opened = 0;
     			usleep(MICROSLEEP);
@@ -274,7 +274,12 @@ int main(void) {
     	if (retval) {
 
     		if (is_dev_opened && FD_ISSET(tty_fd, &rfds)) {
+    			temp = (char *)malloc(BUFFER * sizeof(char));
 				count = read(tty_fd, temp, BUFFER);
+
+				if (count + data_count > BUFFER) {
+	    			goto device_reading_cleanup;
+				}
 
 				finished = 0;
 				for (i = 0; i < count; ++i) {
@@ -287,27 +292,35 @@ int main(void) {
 				memcpy(device_data + data_count, temp, count * sizeof(char));
 				data_count += count;
 
-				if (time(NULL) - open_time > OUTDATE_TIMEOUT) { // Device vanished during reading, 10 sec timeout
-	    			data_count = 0;
-	    			close(tty_fd);
-	    			is_dev_opened = 0;
+				free(temp);
 
-	    			snprintf(logtmp, BUFFER, "Device  %s vanished during reading, closing\n", MODEM);
+				if (time(NULL) - open_time > OUTDATE_TIMEOUT) { // Device vanished during reading, 10 sec timeout
+	    			snprintf(logtmp, BUFFER, "Device  %s vanished during reading, closing\n", device_file);
 	    			send_log(log_sock_fd, logtmp);
-	    			continue;
+
+	    			goto device_reading_cleanup;
 				}
 
 				if (finished) {
 					device_data[data_count] = '\0';
 	    		//	printf("%d '%s'\n", data_count, data);
 	    			process_recv(global_data, device_data);
-	    			data_count = 0;
-	    			close(tty_fd);
-	    			is_dev_opened = 0;
 
-	    			snprintf(logtmp, BUFFER, "Closing device %s\n", MODEM);
+	    			snprintf(logtmp, BUFFER, "Closing device %s\n", device_file);
 	    			send_log(log_sock_fd, logtmp);
+
+	    			goto device_reading_cleanup;
 				}
+
+				goto device_reading_exit;
+
+device_reading_cleanup:
+				data_count = 0;
+				close(tty_fd);
+				is_dev_opened = 0;
+				continue;
+device_reading_exit:
+				;;
     		}
 
 
@@ -336,7 +349,9 @@ int main(void) {
     			if (!j) { // Socket was closed on client
     				log_sock_fd = -1;
     			} else {// Data arrived to read should be ignored on this sock
+    				temp = (char *)malloc(BUFFER * sizeof(char));
     				read(log_sock_fd, temp, BUFFER);
+    				free(temp);
     			}
     		}
 
@@ -401,6 +416,66 @@ int main(void) {
     }
 
     free(reqs);
+
+    return 0;
+}
+
+int main(int argc, char ** argv) {
+
+	pid_t pid, sid;
+	char device[SMALL], port[SMALL], logfile[SMALL];
+	int log_fd;
+
+    if (argc > 1 && strlen(argv[1]) > 0)
+    	strncpy(device, argv[1], SMALL);
+    else
+    	strcpy(device, "/dev/ttyUSB1");
+
+    if (argc > 2 && strlen(argv[2]) > 0)
+    	strncpy(port, argv[2], SMALL);
+    else
+    	strcpy(port, "5000");
+
+    if (argc > 3 && strlen(argv[3]) > 0)
+    	strncpy(logfile, argv[3], SMALL);
+    else
+    	strcpy(logfile, "serial-reader.log");
+
+	if (-1 == (log_fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND))) {
+		printf("Unable to open logfile %s\n", logfile);
+		exit(EXIT_FAILURE);
+	} else
+		close(log_fd);
+
+	pid = fork();
+	if (pid < 0) {
+		exit(EXIT_FAILURE);
+	}
+
+    if (pid > 0) {
+    	exit(EXIT_SUCCESS);
+    }
+
+    umask(0);
+
+    sid = setsid();
+    if (sid < 0) {
+    	exit(EXIT_FAILURE);
+    }
+
+    if ((chdir("/")) < 0) {
+    	exit(EXIT_FAILURE);
+    }
+
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+
+    log_fd = open(logfile, O_RDWR | O_APPEND);
+
+	event_loop(device, port, log_fd);
+
 
     return 0;
 }
