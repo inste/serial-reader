@@ -22,8 +22,8 @@
 #define OUTDATE_TIMEOUT		10	// Seconds
 #define MICROSLEEP			20000 // 20 us
 
-#define DATA_PORT		5000
 #define LOG_PORT		4999
+
 
 
 struct datum {
@@ -170,9 +170,19 @@ int get_max(int tty_fd, int listenfd, int ll_fd, int log_fd, int * sock_fd, int 
 	return (listenfd > max) ? listenfd : max;
 }
 
-void send_log(int log_sock_fd, char * log) {
-	if (log_sock_fd > 0)
-		write(log_sock_fd, log, strlen(log));
+
+void write_log(int log_fd, int log_sock_fd, char * log) {
+	size_t size;
+	char buffer[BUFFER];
+
+	if (log_fd > -1) {
+		size = snprintf(buffer, BUFFER, "[%u] %s\r\n", (unsigned)time(NULL), log);
+		write(log_fd, buffer, size);
+
+		if (log_sock_fd > 0)
+			write(log_sock_fd, buffer, size);
+		fdatasync(log_fd);
+	}
 }
 
 int open_socket(int port) {
@@ -191,9 +201,9 @@ int open_socket(int port) {
 }
 
 
-int event_loop(char * device_file, char * port, int log_fd) {
+int event_loop(char * device_file, int port, int log_fd) {
     int tty_fd, is_dev_opened;
-    char data[BUFFER], device_data[BUFFER], logtmp[BUFFER];
+    char data[BUFFER], device_data[BUFFER];
     int count, data_count;
     int i, j, idx;
 
@@ -203,27 +213,34 @@ int event_loop(char * device_file, char * port, int log_fd) {
     int sock_fd[BUFFER];
     int sock_fd_count = 0;
 
+    struct sockaddr_in	sa = { 0 };
+    socklen_t			sl = sizeof(sa);
+
     int finished;
 
     time_t open_time;
 
-    char * reqs, * temp;
+    char * reqs, * temp, * logtmp;
 
     fd_set rfds;
     struct timeval tv;
     int retval;
 
-    listen_fd = open_socket(DATA_PORT);
+    listen_fd = open_socket(port);
     listen(listen_fd, 25);
 
     log_listen_fd = open_socket(LOG_PORT);
     listen(log_listen_fd, 2);
 
     reqs = (char *)malloc(sizeof(char) * BUFFER * (SMALL + 1));
+    logtmp = (char *)malloc(sizeof(char) * BUFFER);
 
     init_data(global_data);
 
     is_dev_opened = 0;
+
+	snprintf(logtmp, BUFFER, "Process started");
+	write_log(log_fd, log_sock_fd, logtmp);
 
     while (1) {
 
@@ -233,21 +250,22 @@ int event_loop(char * device_file, char * port, int log_fd) {
     		open_time = time(NULL);
 
     		if (tty_fd > 0) {
-    			snprintf(logtmp, BUFFER, "Device %s opened correctly\n", device_file);
-    			send_log(log_sock_fd, logtmp);
+    		//	snprintf(logtmp, BUFFER, "Device %s opened correctly", device_file);
+    		//	write_log(log_fd, log_sock_fd, logtmp);
+
     			write(tty_fd, SETF, strlen(SETF));
     			usleep(MICROSLEEP);
     		}
 
     		if (-ENXIO == tty_fd) {
-    			snprintf(logtmp, BUFFER, "Device file %s doesn't exist\n", device_file);
-    			send_log(log_sock_fd, logtmp);
+    			snprintf(logtmp, BUFFER, "Device file %s doesn't exist", device_file);
+    			write_log(log_fd, log_sock_fd, logtmp);
     			is_dev_opened = 0;
     			usleep(MICROSLEEP);
     		}
     		if (!tty_fd) {
-    			snprintf(logtmp, BUFFER, "Device file %s can't be opened\n", device_file);
-    			send_log(log_sock_fd, logtmp);
+    			snprintf(logtmp, BUFFER, "Device file %s can't be opened", device_file);
+    			write_log(log_fd, log_sock_fd, logtmp);
     			is_dev_opened = 0;
     			usleep(MICROSLEEP);
     		}
@@ -295,8 +313,8 @@ int event_loop(char * device_file, char * port, int log_fd) {
 				free(temp);
 
 				if (time(NULL) - open_time > OUTDATE_TIMEOUT) { // Device vanished during reading, 10 sec timeout
-	    			snprintf(logtmp, BUFFER, "Device  %s vanished during reading, closing\n", device_file);
-	    			send_log(log_sock_fd, logtmp);
+	    			snprintf(logtmp, BUFFER, "Device  %s vanished during reading, closing", device_file);
+	    			write_log(log_fd, log_sock_fd, logtmp);
 
 	    			goto device_reading_cleanup;
 				}
@@ -306,8 +324,8 @@ int event_loop(char * device_file, char * port, int log_fd) {
 	    		//	printf("%d '%s'\n", data_count, data);
 	    			process_recv(global_data, device_data);
 
-	    			snprintf(logtmp, BUFFER, "Closing device %s\n", device_file);
-	    			send_log(log_sock_fd, logtmp);
+	    		//	snprintf(logtmp, BUFFER, "Closing device %s", device_file);
+	    		//	write_log(log_fd, log_sock_fd, logtmp);
 
 	    			goto device_reading_cleanup;
 				}
@@ -325,12 +343,13 @@ device_reading_exit:
 
 
     		if (FD_ISSET(listen_fd, &rfds)) {
-    			sock_fd[sock_fd_count] = accept(listen_fd, (struct sockaddr*)NULL, NULL);
+    			sock_fd[sock_fd_count] = accept(listen_fd, (struct sockaddr *)&sa, &sl);
+    			getpeername(sock_fd[sock_fd_count], (struct sockaddr *)&sa, &sl);
     			memset(reqs + sock_fd_count * (SMALL + 1), 0, sizeof(char) * (SMALL + 1));
     			++sock_fd_count;
 
-    			snprintf(logtmp, BUFFER, "Accepted, has %d conns\n", sock_fd_count);
-    			send_log(log_sock_fd, logtmp);
+    			snprintf(logtmp, BUFFER, "Accepted data connection from %s, has %d conns", inet_ntoa(sa.sin_addr), sock_fd_count);
+    			write_log(log_fd, log_sock_fd, logtmp);
     			continue;
     		}
 
@@ -339,7 +358,10 @@ device_reading_exit:
     				close(log_sock_fd);
     			}
 
-    			log_sock_fd = accept(log_listen_fd, (struct sockaddr*)NULL, NULL);
+    			log_sock_fd = accept(log_listen_fd, (struct sockaddr *)&sa, &sl);
+    			getpeername(log_sock_fd, (struct sockaddr *)&sa, &sl);
+    			snprintf(logtmp, BUFFER, "Accepted log connection from %s", inet_ntoa(sa.sin_addr));
+    			write_log(log_fd, log_sock_fd, logtmp);
     			continue;
     		}
 
@@ -348,6 +370,10 @@ device_reading_exit:
     			ioctl(log_sock_fd, FIONREAD, &j);
     			if (!j) { // Socket was closed on client
     				log_sock_fd = -1;
+
+        			snprintf(logtmp, BUFFER, "Log connection closed");
+        			write_log(log_fd, log_sock_fd, logtmp);
+
     			} else {// Data arrived to read should be ignored on this sock
     				temp = (char *)malloc(BUFFER * sizeof(char));
     				read(log_sock_fd, temp, BUFFER);
@@ -365,8 +391,8 @@ device_reading_exit:
     					memmove(sock_fd + i, sock_fd + i + 1, sizeof(int) * sock_fd_count - i - 1);
     					--sock_fd_count;
 
-    	    			snprintf(logtmp, BUFFER, "Closed, has %d conns\n", sock_fd_count);
-    	    			send_log(log_sock_fd, logtmp);
+    	    			snprintf(logtmp, BUFFER, "Closed, has %d conns", sock_fd_count);
+            			write_log(log_fd, log_sock_fd, logtmp);
     					continue;
     				} else {
     					count = read(sock_fd[i], data, SMALL);
@@ -416,6 +442,7 @@ device_reading_exit:
     }
 
     free(reqs);
+    free(logtmp);
 
     return 0;
 }
@@ -424,7 +451,7 @@ int main(int argc, char ** argv) {
 
 	pid_t pid, sid;
 	char device[SMALL], port[SMALL], logfile[SMALL];
-	int log_fd;
+	int log_fd, port_int = 0;
 
     if (argc > 1 && strlen(argv[1]) > 0)
     	strncpy(device, argv[1], SMALL);
@@ -441,11 +468,24 @@ int main(int argc, char ** argv) {
     else
     	strcpy(logfile, "serial-reader.log");
 
+
+    umask(S_IWGRP | S_IWOTH);
+
+    /* Trying to check availability of logfile */
 	if (-1 == (log_fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND))) {
 		printf("Unable to open logfile %s\n", logfile);
 		exit(EXIT_FAILURE);
 	} else
 		close(log_fd);
+
+	/* Checking correctness of specified port */
+	port_int = strtol(port, NULL, 10);
+
+	if (port_int < 10 || port_int > 65535) {
+		printf("Unexpected port: %s\n", port);
+		exit(EXIT_FAILURE);
+	}
+
 
 	pid = fork();
 	if (pid < 0) {
@@ -456,14 +496,10 @@ int main(int argc, char ** argv) {
     	exit(EXIT_SUCCESS);
     }
 
-    umask(0);
+    umask(S_IWGRP | S_IWOTH);
 
     sid = setsid();
     if (sid < 0) {
-    	exit(EXIT_FAILURE);
-    }
-
-    if ((chdir("/")) < 0) {
     	exit(EXIT_FAILURE);
     }
 
@@ -472,9 +508,9 @@ int main(int argc, char ** argv) {
     close(STDERR_FILENO);
 
 
-    log_fd = open(logfile, O_RDWR | O_APPEND);
+    log_fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND);
 
-	event_loop(device, port, log_fd);
+	event_loop(device, port_int, log_fd);
 
 
     return 0;
