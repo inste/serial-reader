@@ -83,6 +83,7 @@ void write_log(int log_fd, int log_sock_fd, char * log) {
 int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) {
 	int i = 0, j, pos, idx = 5;
 	char temp[SMALL];
+	int retval = 0;
 
 	char * logtmp = (char *)malloc(sizeof(char) * BUFFER);
 
@@ -95,9 +96,6 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 	while (0x02 != recv[i++])
 		;;
 	pos = i;
-
-	printf("Got '%s'\n", recv);
-
 
 	while (1) {
 
@@ -125,7 +123,9 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 			} else {
 				snprintf(logtmp, BUFFER, "Possible data corruption, fields overflow");
 				write_log(log_fd, log_sock_fd, logtmp);
-				return -1;
+
+				retval = -1;
+				goto cleanup;
 			}
 			pos = ++i;
 			continue;
@@ -139,17 +139,23 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 		if (0x00 == recv[i]) {
 			snprintf(logtmp, BUFFER, "Unexpected error: got NULL before ETX");
 			write_log(log_fd, log_sock_fd, logtmp);
-			return -1;
+
+			retval = -1;
+			goto cleanup;
 		}
 
 		if (BUFFER == i) {
 			snprintf(logtmp, BUFFER, "Unexpected error: buffer overrun");
 			write_log(log_fd, log_sock_fd, logtmp);
-			return -1;
+
+			retval = -1;
+			goto cleanup;
 		}
 	}
+
+cleanup:
 	free(logtmp);
-	return 0;
+	return retval;
 }
 
 /*
@@ -328,7 +334,7 @@ int event_loop(char * device_file, int port, int log_fd) {
 
 				free(temp);
 
-				if (time(NULL) - open_time > OUTDATE_TIMEOUT) { // Device vanished during reading, 10 sec timeout
+				if ((time(NULL) - open_time) > OUTDATE_TIMEOUT) { // Device vanished during reading, 10 sec timeout
 					snprintf(logtmp, BUFFER, "Device  %s vanished during reading, closing", device_file);
 					write_log(log_fd, log_sock_fd, logtmp);
 
@@ -337,6 +343,7 @@ int event_loop(char * device_file, int port, int log_fd) {
 
 				if (finished) {
 					device_data[data_count] = '\0';
+
 					if (-1 == process_recv(log_fd, log_sock_fd, global_data, device_data)) {
 						last_update = 0;
 					}
@@ -357,6 +364,7 @@ device_reading_cleanup:
 device_reading_exit:
 				;;
 			}
+
 			if (FD_ISSET(listen_fd, &rfds)) {
 				sock_fd[sock_fd_count] = accept(listen_fd, (struct sockaddr *)&sa, &sl);
 				getpeername(sock_fd[sock_fd_count], (struct sockaddr *)&sa, &sl);
@@ -380,10 +388,11 @@ device_reading_exit:
 				write_log(log_fd, log_sock_fd, logtmp);
 				continue;
 			}
-			if (FD_ISSET(log_sock_fd, &rfds)) {
+			if (log_sock_fd > -1 && FD_ISSET(log_sock_fd, &rfds)) {
 				j = 0;
 				ioctl(log_sock_fd, FIONREAD, &j);
 				if (!j) { // Socket was closed on client
+					close(log_sock_fd);
 					log_sock_fd = -1;
 
 					snprintf(logtmp, BUFFER, "Log connection closed");
@@ -400,6 +409,7 @@ device_reading_exit:
 					ioctl(sock_fd[i], FIONREAD, &j);
 
 					if (!j) { // Socket was closed, cleaning up
+						close(sock_fd[i]);
 						memmove(sock_fd + i, sock_fd + i + 1, sizeof(int) * sock_fd_count - i - 1);
 						--sock_fd_count;
 
@@ -523,7 +533,6 @@ int main(int argc, char ** argv) {
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
-
 
 	log_fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND);
 
