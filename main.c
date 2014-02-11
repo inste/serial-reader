@@ -375,7 +375,6 @@ device_reading_exit:
 						"Accepted data connection from %s, has %d conns",
 						inet_ntoa(sa.sin_addr), sock_fd_count);
 				write_log(log_fd, log_sock_fd, logtmp);
-				continue;
 			}
 			if (FD_ISSET(log_listen_fd, &rfds)) {
 				if (log_sock_fd > 0) { // Closing previous connection
@@ -386,7 +385,6 @@ device_reading_exit:
 				getpeername(log_sock_fd, (struct sockaddr *)&sa, &sl);
 				snprintf(logtmp, BUFFER, "Accepted log connection from %s", inet_ntoa(sa.sin_addr));
 				write_log(log_fd, log_sock_fd, logtmp);
-				continue;
 			}
 			if (log_sock_fd > -1 && FD_ISSET(log_sock_fd, &rfds)) {
 				j = 0;
