@@ -24,6 +24,8 @@
 
 #define LOG_PORT		4999
 
+#define __DEBUG__
+
 
 
 struct datum {
@@ -80,12 +82,15 @@ void write_log(int log_fd, int log_sock_fd, char * log) {
 	}
 }
 
-int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) {
+int process_recv(int log_fd, int log_sock_fd, struct datum * globaldata, char * recv) {
 	int i = 0, j, pos, idx = 5;
 	char temp[SMALL];
 	int retval = 0;
 
 	char * logtmp = (char *)malloc(sizeof(char) * BUFFER);
+	struct datum * newdata = (struct datum *)malloc(sizeof(struct datum) * ITEMS_COUNT);
+
+	memset(newdata, 0, sizeof(struct datum) * ITEMS_COUNT);
 
 /*	0x03 - STX, start transmission
  *	0x2c - comma, fields delimiter
@@ -118,7 +123,7 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 						break;
 				}
 
-				strncpy(data[idx].datum, temp, SMALL);
+				strncpy(newdata[idx].datum, temp, SMALL);
 				++idx;
 			} else {
 				snprintf(logtmp, BUFFER, "Possible data corruption, fields overflow");
@@ -132,7 +137,6 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 		}
 
 		if (0x03 == recv[i]) {
-			last_update = time(NULL);
 			break;
 		}
 
@@ -153,7 +157,11 @@ int process_recv(int log_fd, int log_sock_fd, struct datum * data, char * recv) 
 		}
 	}
 
+	memcpy(globaldata, newdata, sizeof(struct datum) * ITEMS_COUNT);
+	last_update = time(NULL);
+
 cleanup:
+	free(newdata);
 	free(logtmp);
 	return retval;
 }
@@ -375,6 +383,7 @@ device_reading_exit:
 						"Accepted data connection from %s, has %d conns",
 						inet_ntoa(sa.sin_addr), sock_fd_count);
 				write_log(log_fd, log_sock_fd, logtmp);
+				continue;
 			}
 			if (FD_ISSET(log_listen_fd, &rfds)) {
 				if (log_sock_fd > 0) { // Closing previous connection
@@ -385,6 +394,7 @@ device_reading_exit:
 				getpeername(log_sock_fd, (struct sockaddr *)&sa, &sl);
 				snprintf(logtmp, BUFFER, "Accepted log connection from %s", inet_ntoa(sa.sin_addr));
 				write_log(log_fd, log_sock_fd, logtmp);
+				continue;
 			}
 			if (log_sock_fd > -1 && FD_ISSET(log_sock_fd, &rfds)) {
 				j = 0;
@@ -512,6 +522,7 @@ int main(int argc, char ** argv) {
 		exit(EXIT_FAILURE);
 	}
 
+#ifndef __DEBUG__
 	pid = fork();
 	if (pid < 0) {
 		exit(EXIT_FAILURE);
@@ -531,6 +542,8 @@ int main(int argc, char ** argv) {
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
+
+#endif /* __DEBUG__ */
 
 	log_fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND);
 
