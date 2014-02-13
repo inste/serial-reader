@@ -34,6 +34,7 @@ struct datum {
 
 struct datum	global_data[ITEMS_COUNT];
 time_t		last_update = 0;
+time_t		start_time;
 
 
 int dev_exists(char * filename) {
@@ -240,6 +241,101 @@ void process_native(char * request, int sock_fd) {
 }
 
 
+#define ZBXPADOFFSET	13
+#define ZBXLENPAD	5
+#define ZBXD		"ZBXD\x01"
+void process_zabbix(char * request, int sock_fd) {
+	int padlen, is_float, idx;
+	char * apos, * rpos, * saved;
+	double tempval;
+
+	char * buffer = (char *)malloc(sizeof(char) * BUFFER);
+	char * data = buffer + ZBXPADOFFSET;
+
+	memset(buffer, 0, sizeof(char) * BUFFER);
+
+	if (!strcmp("agent.hostname", request)) {
+		strcpy(data, "Puritan Bennett 840 Medical Ventilator");
+		goto do_write;
+	}
+
+	if (!strcmp("agent.uptime", request)) {
+		snprintf(data, SMALL, "%u", (unsigned int)(time(NULL) - start_time));
+		goto do_write;
+	}
+
+	if (!strncmp("medvent", request, 7)) {
+		apos = strchr(request + 7, '[');
+		rpos = strchr(request + 7, ']');
+
+		if (apos && rpos && rpos > apos && (rpos - apos) < SMALL) {
+			*rpos = '\0';
+			apos++;
+
+			is_float = 1;
+
+			rpos = strtok_r(apos, ",", &saved);
+			if (rpos) {
+				if (!(apos = strtok_r(NULL, ",", &saved)))
+					is_float = 0;
+				else {
+					if (!strcmp(apos, "f"))
+						is_float = 1;
+					if (!strcmp(apos, "t"))
+						is_float = 0;
+				}
+
+				idx = strtol(rpos, NULL, 10);
+
+				if (!is_float) {
+					if (idx > 4 && idx < ITEMS_COUNT) {
+						if (time(NULL) - last_update < OUTDATE_TIMEOUT) { // Old data, don't send it?
+							snprintf(data, SMALL, "%s", global_data[idx].datum);
+						} else {
+							snprintf(data, SMALL, "OUTDATED");
+						}
+					} else {
+						snprintf(data, SMALL, "BAD_REQUEST");
+					}
+
+					goto do_write;
+				} else {
+					if (idx > 4 && idx < ITEMS_COUNT) {
+						if (time(NULL) - last_update < OUTDATE_TIMEOUT) { // Old data, don't send it?
+							tempval = strtod(global_data[idx].datum, &rpos);
+
+							if (global_data[idx].datum == rpos || ERANGE == errno) {
+								snprintf(data, SMALL, "-3");
+							} else {
+								snprintf(data, SMALL, "%g", tempval);
+							}
+
+						} else {
+							snprintf(data, SMALL, "-1");
+						}
+					} else {
+						snprintf(data, SMALL, "-2");
+					}
+
+					goto do_write;
+				}
+			}
+		}
+	}
+
+
+/*	Push data to be written in 'data' variable (zero-trailing, and no more than 255 chars) and call to do_write label */
+do_write:
+	padlen = strlen(buffer + ZBXPADOFFSET);
+	strcpy(buffer, ZBXD);
+	*((unsigned char *)(buffer + ZBXLENPAD)) = padlen & 0xFF;
+	write(sock_fd, buffer, ZBXPADOFFSET + padlen);
+
+	free(buffer);
+	return;
+}
+
+
 int event_loop(char * device_file, int port, int log_fd) {
 	int tty_fd, is_dev_opened;
 	char data[BUFFER], device_data[BUFFER];
@@ -264,6 +360,8 @@ int event_loop(char * device_file, int port, int log_fd) {
 	fd_set rfds;
 	struct timeval tv;
 	int retval;
+
+	start_time = time(NULL);
 
 	listen_fd = open_socket(port);
 	listen(listen_fd, 25);
@@ -461,7 +559,6 @@ device_reading_exit:
 									finished = 2;  // Zabbix protocol
 									break;
 								}
-
 							}
 
 							if (finished) {
@@ -470,6 +567,11 @@ device_reading_exit:
 								case 1 :
 									process_native(reqs + i * (SMALL + 1) + 1, sock_fd[i]);
 									break;
+								case 2 :
+									process_zabbix(reqs + i * (SMALL + 1) + 1, sock_fd[i]);
+									break;
+								default:
+									;;
 								}
 								*(reqs + i * (SMALL + 1)) = 0x00;
 							}
