@@ -219,12 +219,32 @@ int open_socket(int port) {
 	return sock_fd;
 }
 
+void process_native(char * request, int sock_fd) {
+	int idx, count;
+	char * data = (char *)malloc(sizeof(char) * BUFFER);
+
+	idx = strtol(request, NULL, 10);
+
+	if (idx > 4 && idx < ITEMS_COUNT) {
+		if (time(NULL) - last_update < OUTDATE_TIMEOUT) { // Old data, don't send it?
+			count = snprintf(data, SMALL, "%s\r", global_data[idx].datum);
+			write(sock_fd, data, count);
+		} else {
+			count = snprintf(data, SMALL, "OUTDATED\r");
+			write(sock_fd, data, count);
+		}
+	} else {
+		count = snprintf(data, SMALL, "BAD_REQUEST\r");
+		write(sock_fd, data, count);
+	}
+}
+
 
 int event_loop(char * device_file, int port, int log_fd) {
 	int tty_fd, is_dev_opened;
 	char data[BUFFER], device_data[BUFFER];
 	int count, data_count;
-	int i, j, idx;
+	int i, j;
 
 	int listen_fd;
 	int log_listen_fd;
@@ -434,26 +454,22 @@ device_reading_exit:
 							finished = 0;
 							for (j = 0; j < *(reqs + i * (SMALL + 1)); ++j) {
 								if ('\r' == *(reqs + i * (SMALL + 1) + 1 + j)) {
-									++finished;
+									finished = 1;  // Native protocol
 									break;
 								}
+								if ('\n' == *(reqs + i * (SMALL + 1) + 1 + j)) {
+									finished = 2;  // Zabbix protocol
+									break;
+								}
+
 							}
 
 							if (finished) {
 								*(reqs + i * (SMALL + 1) + j + 1) = 0x00;
-								idx = strtol(reqs + i * (SMALL + 1) + 1, NULL, 10);
-
-								if (idx > 4 && idx < ITEMS_COUNT) {
-									if (time(NULL) - last_update < OUTDATE_TIMEOUT) { // Old data, don't send it?
-										count = snprintf(data, SMALL, "%s\r", global_data[idx].datum);
-										write(sock_fd[i], data, count);
-									} else {
-										count = snprintf(data, SMALL, "OUTDATED\r");
-										write(sock_fd[i], data, count);
-									}
-								} else {
-									count = snprintf(data, SMALL, "BAD_REQUEST\r");
-									write(sock_fd[i], data, count);
+								switch (finished) {
+								case 1 :
+									process_native(reqs + i * (SMALL + 1) + 1, sock_fd[i]);
+									break;
 								}
 								*(reqs + i * (SMALL + 1)) = 0x00;
 							}
